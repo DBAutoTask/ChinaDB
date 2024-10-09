@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+#==============================================================#
+# File    :  YashanDBInstall
+# Ctime   :  2024-09-04 21:13:09
+# Mtime   :  2024-09-04 21:13:09
+# Desc    :  Yashan Database Install for single
+# Path    :  /soft/YashanDBInstall
+# Version :  1.0.0
+# Author  :  Lucifer(pc1107750981@163.com)
+# Copyright (C) 2022-2099 Pengcheng Liu
+#==============================================================#
+# 导出 PS4 变量，以便 set -x 调试时输出行号和函数参数
+export PS4='+${BASH_SOURCE}:${LINENO}:${FUNCNAME[0]}: '
+#==============================================================#
+#                         全局变量定义                           #
+#==============================================================#
+# 获取安装软件以及脚本目录（当前目录）
+software_dir=$(dirname "$(readlink -f "$0")")
+# 当前执行脚本系统时间
+current=$(date +%Y%m%d%H%M%S)
+# 删除脚本生成的 log 日志文件
+find "$software_dir" -name "print_yashan_install_*.log" -exec /bin/rm -rf {} +
+find "$software_dir" -name "yashan_install_output_*.log" -exec /bin/rm -rf {} +
+# 脚本安装日志文件
+yashaninstalllog=$software_dir/print_yashan_install_${current}.log
+# 脚本输出日志文件
+yashanprintlog=$software_dir/yashan_install_output_${current}.log
+# 物理内存（KB）
+os_memory_total=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+# 主机名称
+hostname=yashan
+# 数据库名称，默认值为 orcl，支持多个实例，传参以逗号隔开：yashan,lucifer
+db_name=yashan
+# 系统用户 yashan 名称，默认值为 yashan
+yashan_user=yashan
+# 系统用户 oracle 密码，默认值为 yashan
+yashan_passwd=yashan
+# 数据库用户 sys/system 密码, 默认值为 yashan
+database_passwd=yashan
+# 数据库软件安装根目录，默认值为 /yashandb
+env_base_dir=/yashandb
+# 单机数据库参数，数据文件目录，默认值为 /oradata
+yasdata_dir=/yasdb_data
+# 数据库备份目录，默认值为 /backup
+backup_dir=/backup
+# 数据库字符集，默认值为 UTF8
+declare -u nls_characterset=UTF8
+# 数据库块大小，默认值为 8192
+db_block_size=8K
+
+#==============================================================#
+#                           颜色打印                            #
+#==============================================================#
+function color_printf() {
+    declare -u con_flag
+    declare -A color_map=(
+        ["red"]='\E[1;31m'
+        ["green"]='\E[1;32m'
+        ["blue"]='\E[1;34m'
+        ["yellow"]='\E[1;33m'
+        ["light_blue"]='\E[1;94m'
+        ["purple"]='\033[35m'
+    )
+    local res='\E[0m' default_color='\E[1;32m'
+    local color=${color_map[$1]:-"$default_color"}
+    case "$1" in
+    "red")
+        # 打印红色文本并退出
+        printf "\n${color}%-20s %-30s %-50s\n${res}\n" "$2" "$3" "$4"
+        exit 1
+        ;;
+    "green" | "light_blue")
+        # 打印绿色或浅蓝色文本
+        printf "${color}%-20s %-30s %-50s\n${res}" "$2" "$3" "$4"
+        ;;
+    "purple")
+        # 打印紫色文本并等待用户输入
+        printf "${color}%-s${res}" "$2" "$3"
+        read -r con_flag
+        # 如果用户未输入，默认为继续
+        if [[ -z $con_flag ]]; then
+            con_flag=Y
+        fi
+        if [[ $con_flag != "Y" ]]; then
+            echo
+            exit 1
+        fi
+        ;;
+    *)
+        # 打印其他颜色文本
+        printf "${color}%-20s %-30s %-50s\n${res}\n" "$2" "$3" "$4"
+        ;;
+    esac
+}
+#==============================================================#
+#                          日志打印                             #
+#==============================================================#
+function log_print() {
+    echo
+    color_printf green "#==============================================================#"
+    color_printf green "$1"
+    color_printf green "#==============================================================#"
+    echo
+}
+#==============================================================#
+#                      执行命令并输出日志文件                      #
+#==============================================================#
+function execute_and_log() {
+    local prompt="$1" cmd="$2" log_file="$oracleinstalllog" pid start_time end_time execution_time status
+    # 打印提示信息
+    echo -e "\e[1;34m${prompt}\e[0m\c"
+    printf "......"
+    # 记录开始时间
+    start_time=$(date +%s)
+    # 执行命令并将输出重定向到日志文件
+    if [[ $debug_flag == "Y" ]]; then
+        set -x
+    fi
+    eval "$cmd" >>"$log_file" 2>&1 &
+    if [[ $debug_flag == "Y" ]]; then
+        set +x
+    fi
+    pid=$!
+    # 显示进度条
+    while ps -p $pid >/dev/null 2>&1; do
+        printf "."
+        sleep 0.5
+        printf "\b"
+        sleep 0.5
+    done
+    # 记录结束时间
+    end_time=$(date +%s)
+    execution_time=$((end_time - start_time))
+    # 等待命令执行完成
+    wait $pid
+    status=$?
+    # 根据命令执行状态打印结果
+    if ((status == 0 || status == 3)); then
+        printf "已完成 (耗时: %s 秒)\n" "$execution_time"
+    elif [[ $status != 0 && $cmd == "pkg_install" ]]; then
+        printf "已完成 (耗时: %s 秒)\n" "$execution_time"
+    else
+        printf "执行出错，请检查日志 %s\n" "$log_file"
+        exit 1
+    fi
+}
+#==============================================================#
+#                         脚本通用函数                           #
+#==============================================================#
+function upper() {
+    # 将字符串转换为大写
+    echo "${1^^}"
+}
+function lower() {
+    # 将字符串转换为小写
+    echo "${1,,}"
+}
+function checkpara_NULL() {
+    # 检查参数是否为空
+    if [[ -z $2 || $2 == -* ]]; then
+        color_printf red "参数 [ $1 ] 的值为空，请检查！"
+    fi
+}
+function checkpara_YN() {
+    # 检查参数是否为 Y 或者 N
+    if ! [[ $2 =~ ^[YyNn]$ ]]; then
+        color_printf red "参数 [ $1 ] 的值 $2 必须为 Y 或者 N，请检查！"
+    fi
+}
+function checkpara_tf() {
+    # 检查参数是否为 Y 或者 N
+    if ! [[ $2 =~ ^(true|false)$ ]]; then
+        color_printf red "参数 [ $1 ] 的值 $2 必须为 true 或者 false，请检查！"
+    fi
+}
+
+function checkpara_REDUN() {
+    # 检查 RAC 参数是否为 EXTERNAL，NORMAL 或者 HIGH
+    local REDUN="EXTERNAL|NORMAL|HIGH"
+    if ! [[ $2 =~ ^($REDUN)$ ]]; then
+        color_printf red "RAC 参数 [ $1 ] 的值 $2 必须为 EXTERNAL，NORMAL 或者 HIGH，请检查！"
+    fi
+}
+function check_password() {
+    local password="$2"
+    # 密码中不能有不可见的控制字符，例如回车换行制表符等
+    if [[ $password =~ [[:cntrl:]] ]]; then
+        color_printf red "参数 [ $1 ] 的密码 $2 不符合要求，包含不可见字符，请检查！"
+    fi
+    if [[ $1 == "-dp" ]]; then
+        if ! [[ $password =~ ^[a-zA-Z][a-zA-Z0-9#$_]*$ ]]; then
+            color_printf red "参数 [ $1 ] 的密码 $2 不符合要求，必须以字母开头，并且字符只能包含 (_)，(#)，($) ，请检查！"
+        fi
+    fi
+}
+function checkpara_NUMERIC() {
+    # 检查参数是否为数字
+    if ! [[ $2 =~ ^[0-9]+$ ]]; then
+        color_printf red "参数 [ $1 ] 的值 $2 不是数字，请检查！"
+    fi
+}
+function checkpara_DBS() {
+    # 检查 db_block_size 参数值
+    local DBS="2048|4096|8192|16384|32768"
+    if ! [[ $2 =~ ^($DBS)$ ]]; then
+        color_printf red "参数 [ $1 ] 的值 $2 必须为 2048，4096，8192，16384 或者 32768，请检查！"
+    fi
+}
+function checkpara_DBCHARSET() {
+    # 所有有效字符集的列表 247 个
+    local CHARSETS="AL16UTF16|AL24UTFFSS|AL32UTF8|AR8ADOS710|AR8ADOS710T|AR8ADOS720|AR8ADOS720T|AR8APTEC715|AR8APTEC715T|AR8ARABICMAC|AR8ARABICMACS|AR8ARABICMACT|AR8ASMO708PLUS|AR8ASMO8X|AR8EBCDIC420S|AR8EBCDICX|AR8HPARABIC8T|AR8ISO8859P6|AR8MSWIN1256|AR8MUSSAD768|AR8MUSSAD768T|AR8NAFITHA711|AR8NAFITHA711T|AR8NAFITHA721|AR8NAFITHA721T|AR8SAKHR706|AR8SAKHR707|AR8SAKHR707T|AR8XBASIC|AZ8ISO8859P9E|BG8MSWIN|BG8PC437S|BLT8CP921|BLT8EBCDIC1112|BLT8EBCDIC1112S|BLT8ISO8859P13|BLT8MSWIN1257|BLT8PC775|BN8BSCII|CDN8PC863|CE8BS2000|CEL8ISO8859P14|CH7DEC|CL8BS2000|CL8EBCDIC1025|CL8EBCDIC1025C|CL8EBCDIC1025R|CL8EBCDIC1025S|CL8EBCDIC1025X|CL8EBCDIC1158|CL8EBCDIC1158R|CL8ISO8859P5|CL8ISOIR111|CL8KOI8R|CL8KOI8U|CL8MACCYRILLIC|CL8MACCYRILLICS|CL8MSWIN1251|D7DEC|D7SIEMENS9780X|D8BS2000|D8EBCDIC1141|D8EBCDIC273|DK7SIEMENS9780X|DK8BS2000|DK8EBCDIC1142|DK8EBCDIC277|E7DEC|E7SIEMENS9780X|E8BS2000|EE8BS2000|EE8EBCDIC870|EE8EBCDIC870C|EE8EBCDIC870S|EE8ISO8859P2|EE8MACCE|EE8MACCES|EE8MACCROATIAN|EE8MACCROATIANS|EE8MSWIN1250|EE8PC852|EEC8EUROASCI|EEC8EUROPA3|EL8DEC|EL8EBCDIC423R|EL8EBCDIC875|EL8EBCDIC875R|EL8EBCDIC875S|EL8GCOS7|EL8ISO8859P7|EL8MACGREEK|EL8MACGREEKS|EL8MSWIN1253|EL8PC437S|EL8PC737|EL8PC851|EL8PC869|ET8MSWIN923|F7DEC|F7SIEMENS9780X|F8BS2000|F8EBCDIC1147|F8EBCDIC297|HU8ABMOD|HU8CWI2|I7DEC|I7SIEMENS9780X|I8EBCDIC1144|I8EBCDIC280|IN8ISCII|IS8MACICELANDIC|IS8MACICELANDICS|IS8PC861|IW7IS960|IW8EBCDIC1086|IW8EBCDIC424|IW8EBCDIC424S|IW8ISO8859P8|IW8MACHEBREW|IW8MACHEBREWS|IW8MSWIN1255|IW8PC1507|JA16DBCS|JA16DBCSFIXED|JA16EBCDIC930|JA16EUC|JA16EUCFIXED|JA16EUCTILDE|JA16EUCYEN|JA16MACSJIS|JA16SJIS|JA16SJISFIXED|JA16SJISTILDE|JA16SJISYEN|JA16VMS|KO16DBCS|KO16DBCSFIXED|KO16KSC5601|KO16KSC5601FIXED|KO16KSCCS|KO16MSWIN949|LA8ISO6937|LA8PASSPORT|LT8MSWIN921|LT8PC772|LT8PC774|LV8PC1117|LV8PC8LR|LV8RST104090|N7SIEMENS9780X|N8PC865|NDK7DEC|NE8ISO8859P10|NEE8ISO8859P4|NL7DEC|RU8BESTA|RU8PC855|RU8PC866|S7DEC|S7SIEMENS9780X|S8BS2000|S8EBCDIC1143|S8EBCDIC278|SE8ISO8859P3|SF7ASCII|SF7DEC|TH8MACTHAI|TH8MACTHAIS|TH8TISASCII|TH8TISEBCDIC|TH8TISEBCDICS|TR7DEC|TR8DEC|TR8EBCDIC1026|TR8EBCDIC1026S|TR8MACTURKISH|TR8MACTURKISHS|TR8MSWIN1254|TR8PC857|US7ASCII|US8BS2000|US8ICL|US8PC437|UTF8|UTFE|VN8MSWIN1258|VN8VN3|WE8BS2000|WE8BS2000E|WE8BS2000L5|
+WE8DEC|WE8DG|WE8EBCDIC1047|WE8EBCDIC1047E|WE8EBCDIC1140|WE8EBCDIC1140C|WE8EBCDIC1145|WE8EBCDIC1146|WE8EBCDIC1148|WE8EBCDIC1148C|WE8EBCDIC284|WE8EBCDIC285|WE8EBCDIC37|WE8EBCDIC37C|WE8EBCDIC500|WE8EBCDIC500C|WE8EBCDIC871|WE8EBCDIC924|WE8GCOS7|WE8HP|WE8ICL|WE8ISO8859P1|WE8ISO8859P15|WE8ISO8859P9|WE8ISOICLUK|WE8MACROMAN8|WE8MACROMAN8S|WE8MSWIN1252|WE8NCR4970|WE8NEXTSTEP|WE8PC850|WE8PC858|WE8PC860|WE8ROMAN8|YUG7ASCII|ZHS16CGB231280|ZHS16CGB231280FIXED|ZHS16DBCS|ZHS16DBCSFIXED|ZHS16GBK|ZHS16GBKFIXED|ZHS16MACCGB231280|ZHS32GB18030|ZHT16BIG5|ZHT16BIG5FIXED|ZHT16CCDC|ZHT16DBCS|ZHT16DBCSFIXED|ZHT16DBT|ZHT16HKSCS|ZHT16HKSCS31|ZHT16MSWIN950|ZHT32EUC|ZHT32EUCFIXED|ZHT32SOPS|ZHT32TRIS|ZHT32TRISFIXED"
+    # 检查参数是否在有效字符集列表中
+    if ! [[ $2 =~ ^($CHARSETS)$ ]]; then
+        color_printf red "数据库字符集参数 [ $1 ] 的值 $2 无效，请检查！"
+    fi
+}
+function checkpara_NCHARSET() {
+    # 所有有效字符集的列表
+    local NCHARSETS="UTF8|AL16UTF16"
+    # 检查参数是否在有效字符集列表中
+    if ! [[ $2 =~ ^($NCHARSETS)$ ]]; then
+        color_printf red "国家字符集参数 [ $1 ] 的值 $2 无效，请检查！"
+    fi
+}
+function check_DBNAME() {
+    local dbname="$1"
+    local regex="^[a-zA-Z0-9]+$"
+    if ! [[ $dbname =~ $regex ]]; then
+        color_printf red "参数 [ -o ] 的值 $dbname 不符合要求，请使用数字和字母，不要使用特殊字符，请检查！"
+    fi
+}
+function check_RACNAME() {
+    # 检查参数是否为数字
+    if [[ $2 =~ ^[0-9] ]]; then
+        color_printf red "参数 [ $1 ] 的值 $2 不能使用数字开头，请检查！"
+    fi
+}
+function check_file() {
+    # 检查文件是否存在
+    if [[ -e "$1" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+function mv_file() {
+    local file_path=$1
+    # 检查原始文件是否存在
+    if ! check_file "$file_path".original; then
+        # 检查文件是否存在
+        if check_file "$file_path"; then
+            # 不存在则备份为原始文件
+            /bin/mv -f "$file_path"{,.original} >/dev/null 2>&1
+        fi
+    fi
+}
+function rm_file() {
+    local file=$1
+    # 检查文件是否存在
+    if check_file "$file"; then
+        # 不存在则备份为原始文件
+        /bin/rm -rf "$file" >/dev/null 2>&1
+    fi
+}
+function backup_restore_file() {
+    local file_path=$1
+    if check_file "$file_path"; then
+        if (($(grep -E -c "# OracleBegin" "$file_path") == 0)); then
+            /bin/cp -f "$file_path"{,.original}
+        else
+            /bin/cp -f "$file_path"{,."$current"}
+            /bin/cp -f "$file_path"{.original,}
+        fi
+    else
+        touch "$file_path".original
+    fi
+}
+function write_file() {
+    local flag=$1 file_name=$2 content=$3
+    if [[ $flag == "Y" ]]; then
+        cat <<-EOF >"$file_name"
+$content
+EOF
+    elif [[ $flag == "N" ]]; then
+        cat <<-EOF >>"$file_name"
+$content
+EOF
+    fi
+}
+function run_as_oracle() {
+    local command="$1"
+    su - $oracle_user -c "$command"
+}
+function run_as_grid() {
+    local command="$1"
+    su - $grid_user -c "$command"
+}
+function execute_sqlplus() {
+    local dbname="$1" format="$2" sql="$3"
+    su - $oracle_user <<-SOF
+source /home/$oracle_user/.$dbname
+sqlplus -S / as sysdba<<-\EOF
+set lin 2222 pages 1000 tab off feedback off
+$format
+$sql
+exit;
+EOF
+SOF
+}
+function check_ip() {
+    # 检查 IP 地址格式是否正确
+    local ip=$1
+    if echo "$ip" | grep -Eq "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then
+        return 0
+    else
+        return 1
+    fi
+}
+function check_ip_connectivity() {
+    # 检查 IP 地址是否可以 ping 通
+    local ip=$1
+    if ! ping -c 1 "$ip" >/dev/null 2>&1; then
+        color_printf red "IP地址 $ip 无法 ping 通，请检查！"
+    fi
+}
+function check_ip_unreachability() {
+    # 检查 IP 地址是否可以 ping 通
+    local ip=$2
+    if ping -c 1 "$ip" >/dev/null 2>&1; then
+        color_printf red "RAC $1 的 $ip 可以被 ping 通，可能被占用，请检查！"
+    fi
+}
+function isunique_ip() {
+    # 检查 IP 地址是否唯一
+    declare -A ip_count
+    for ip in "${allips[@]}"; do
+        ((ip_count[$ip]++))
+    done
+    for ip in "${!ip_count[@]}"; do
+        if ((ip_count[$ip] > 1)); then
+            color_printf red "IP地址 $ip 存在重复，请检查！"
+        fi
+    done
+}
+function check_internet_connectivity() {
+    # 检查网络连接是否正常
+    if ! ping -c 1 www.baidu.com >/dev/null 2>&1; then
+        color_printf red "脚本参数 [ -nrp ] 值为 $net_repo，当前操作系统 [ $pretty_name ] 需要配置网络软件源，必须联网，否则安装失败！"
+    fi
+}
+
+#==============================================================#
+#                            主函数                             #
+#==============================================================#
+function main() {
+    # 打印脚本 Logo
+    logo_print
+    # 脚本处理传参
+    accept_para "$@"
+    # 获取操作系统信息
+    get_os_info
+    # 关闭防火墙
+    systemctl stop firewalld
+    systemctl disable firewalld
+    # 关闭交换分区 swap
+    sysctl -w vm.swappiness=0
+    echo " vm.swappiness = 0" >>/etc/sysctl.conf
+    # 安装依赖包
+    yum install -y tar openssl gmssl lz4 zlib zstd monit
+
+    # 配置系统参数
+    sysctl -w net.ipv4.ip_local_por t_range='32768 60999'
+    echo "net.ipv4.ip_local_por t_range = 32768 60999" >>/etc/sysctl.conf
+    sysctl -w vm.max_map_count=2000000
+    echo " vm.max_map_count=2000000" >>/etc/sysctl.conf
+    sysctl -p
+    # 调整资源限制值
+    vi /etc /security/limits.conf
+    yashan soft nofile 65536 #表示yashan用户可以打开的最大的文件描述符数量65536个
+    yashan hard nofile 65536
+    yashan soft nproc 65536 #表示yashan用户可以打开的最大的进程数65536个
+    yashan hard nproc 65536
+    yashan soft rss unlimited #表示yashan用户可以没有限制的使用常驻内存的大小
+    yashan hard rss unlimited
+    yashan soft stack 8192 #表示yashan用户可以使用linux的默认栈空间大小是8192kb
+    yashan hard stack 8192
+    # 创建用户和目录
+    useradd yashan
+    groupadd -g 54321 yashan
+    useradd -u 54321 -g yashan -G yashan -m yashan
+    echo "yashan:yashan" | chpasswd
+    mkdir -p /data/yashan
+    chmod -R 775 /data/yashan
+
+    # 关闭透明大页
+    grubby --update-kernel=ALL --args="numa=off" "transparent_hugepage=never" "elevator=deadline"
+    # 调整大页内存
+
+    # 安装
+    [yashan@yashandb bin]$ ./yasboot package se gen --cluster yashandb -u yashan -p yashan --ip 10.211.55.88 --port 22 --install-path /data/yashan/yasdb_home --data-path /data/yashan/yasdb_data --begin-port 1688
+    host host0001 openssl version: OpenSSL 1.1.1wa 16 Nov 2023
+    OpenSSL version is 1.1.1 or greater
+    hostid | group | node_type | node_name | listen_addr | replication_addr | data_path
+    ------------------------------------------------------------------------------------------------------------
+    host0001 | dbg1 | db | 1-1 | 10.211.55.88:1688 | 10.211.55.88:1689 | /data/yashan/yasdb_data
+    ----------+-------+-----------+-----------+-------------------+-------------------+-------------------------
+
+    [yashan@yashandb bin]$ ./yasboot package install -t hosts.toml -i /soft/yashandb-personal-23.2.3.100-linux-aarch64.tar.gz
+    host host0001 openssl version: OpenSSL 1.1.1wa 16 Nov 2023
+    OpenSSL version is 1.1.1 or greater
+    checking install package...
+    install version: yashandb 23.2.3.100
+    host0001 100% [====================================================================] 3s
+    update host to yasom...
+
+    [yashan@yashandb bin]$ ./yasboot cluster deploy -t yashandb.toml
+    type | uuid | name | hostid | index | status | return_code | progress | cost
+    ------------------------------------------------------------------------------------------------------------
+    task | 091cd5dd0cbb6155 | DeployYasdbCluster | - | yashandb | SUCCESS | 0 | 100 | 6
+    ------+------------------+--------------------+--------+----------+---------+-------------+----------+------
+    task completed, status: SUCCESS
+
+    [yashan@yashandb bin]$ cd /data/yashan/yasdb_home/yashandb/23.2.3.100/conf/
+    [yashan@yashandb conf]$ cat yashandb.bashrc >>~/.bashrc
+    [yashan@yashandb conf]$ source ~/.bashrc
+
+    [yashan@yashandb ~]$ yasboot cluster password set -n yashandb.1 -c yashandb
+    type | uuid | name | hostid | index | status | return_code | progress | cost
+    ----------------------------------------------------------------------------------------------------------
+    task | 4a9ec4001fdd5b6d | YasdbPasswordSet | - | yashandb | SUCCESS | 0 | 100 | 2
+    ------+------------------+------------------+--------+----------+---------+-------------+----------+------
+    task completed, status: SUCCESS
+
+}
+# 执行主函数
+main "$@" | tee -a "$oracleprintlog"
